@@ -32,10 +32,24 @@ SNI=learn.microsoft.com
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ── 1. зависимости ──────────────────────────────────────────────────────────
-say "Ставлю зависимости (jq, qrencode, python3, openssl, curl, git)…"
+say "Проверяю зависимости…"
+command -v apt-get >/dev/null || die "нужен apt (Debian/Ubuntu). Другие дистрибутивы пока не поддержаны."
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq jq qrencode python3 openssl curl git ca-certificates >/dev/null
+# команда -> apt-пакет (если команда называется иначе)
+declare -A PKG=( [jq]=jq [qrencode]=qrencode [python3]=python3 [openssl]=openssl [curl]=curl [git]=git )
+need=()
+for c in "${!PKG[@]}"; do command -v "$c" >/dev/null 2>&1 || need+=("${PKG[$c]}"); done
+if [ ${#need[@]} -gt 0 ]; then
+  say "Доустанавливаю: ${need[*]} ca-certificates"
+  apt-get update -qq || die "apt-get update не прошёл (проверь сеть/репозитории)"
+  apt-get install -y -qq "${need[@]}" ca-certificates >/dev/null || die "не удалось поставить: ${need[*]}"
+else
+  ok "всё уже стоит"
+fi
+# верификация
+for c in jq qrencode python3 openssl curl git; do
+  command -v "$c" >/dev/null 2>&1 || die "после установки нет команды: $c"
+done
 ok "зависимости готовы"
 
 # ── 2. Xray-core ────────────────────────────────────────────────────────────
