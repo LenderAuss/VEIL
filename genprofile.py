@@ -89,9 +89,9 @@ def main():
 
     configs = [
         {**base, "inbounds": inbounds, "outbounds": [obychny, frag] + static,
-         "routing": routing, "remarks": "[Обычный] мобильный интернет"},
+         "routing": routing, "remarks": "🌐 VPN · Обычный"},
         {**base, "inbounds": inbounds, "outbounds": [usilenny, frag] + static,
-         "routing": routing, "remarks": "[Усиленный] Wi-Fi / жёсткие блокировки"},
+         "routing": routing, "remarks": "🌐 VPN · Усиленный"},
     ]
     print(json.dumps(configs, ensure_ascii=False, indent=2))
 

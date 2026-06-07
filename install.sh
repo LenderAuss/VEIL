@@ -61,21 +61,32 @@ else
   ok "Xray уже установлен ($(xray version 2>/dev/null | head -1 || true))"
 fi
 
-# ── 3. ключи/идентификаторы (всё своё) ──────────────────────────────────────
-say "Генерирую Reality-ключи и идентификаторы…"
-KP=$(xray x25519)
-PRIV=$(echo "$KP" | awk '/PrivateKey|Private key/{print $NF}' | head -1)
-PUB=$(echo  "$KP" | awk '/Password|PublicKey|Public key/{print $NF}' | head -1)
-[ -n "$PRIV" ] && [ -n "$PUB" ] || die "не смог распарсить xray x25519:\n$KP"
-SID_OB=$(openssl rand -hex 8)
-SID_US=$(openssl rand -hex 8)
-PATH_OB="/$(openssl rand -hex 6)"
-PATH_US="/$(openssl rand -hex 6)"
-SRV_IP=$(curl -s --max-time 10 https://api.ipify.org || curl -s --max-time 10 https://ifconfig.me || echo "СЕРВЕР_IP")
+# ── 3. ключи/идентификаторы (всё своё; ИДЕМПОТЕНТНО) ────────────────────────
+# Повторный запуск install НЕ ротирует ключи — иначе у всех юзеров отвалится
+# подключение. Если $META уже есть — переиспользуем секреты/иды/порты/SNI.
+if [ -f "$META" ]; then
+  say "Найден $META — переиспользую ключи ноды (юзеры не ломаются)…"
+  # shellcheck disable=SC1090
+  . "$META"
+  PUB="$PBK"
+  REPO_DIR="$(cd "$(dirname "$0")" && pwd)"   # вернуть актуальный путь репо (META мог перетереть)
+  [ -n "${PRIV:-}" ] && [ -n "${PUB:-}" ] || die "$META повреждён (нет PRIV/PBK) — удали /etc/veil и переустанови"
+else
+  say "Генерирую Reality-ключи и идентификаторы…"
+  KP=$(xray x25519)
+  PRIV=$(echo "$KP" | awk '/PrivateKey|Private key/{print $NF}' | head -1)
+  PUB=$(echo  "$KP" | awk '/Password|PublicKey|Public key/{print $NF}' | head -1)
+  [ -n "$PRIV" ] && [ -n "$PUB" ] || die "не смог распарсить xray x25519:\n$KP"
+  SID_OB=$(openssl rand -hex 8)
+  SID_US=$(openssl rand -hex 8)
+  PATH_OB="/$(openssl rand -hex 6)"
+  PATH_US="/$(openssl rand -hex 6)"
+fi
+SRV_IP=$(curl -s --max-time 10 https://api.ipify.org || curl -s --max-time 10 https://ifconfig.me || echo "${SRV_IP:-СЕРВЕР_IP}")
 # sslip.io даёт бесплатный hostname из IP (<ip>.sslip.io -> этот IP) — нужен для
 # валидного Let's Encrypt сертификата на подписке (домена у ноды нет).
 SUB_HOST="${SRV_IP}.sslip.io"
-ok "ключи сгенерированы (pbk ${PUB:0:12}…)"
+ok "ключи готовы (pbk ${PUB:0:12}…)"
 
 # ── 4. каталог veil + единый источник (server.env) ──────────────────────────
 say "Разворачиваю $VEIL (единый источник параметров + генераторы)…"
@@ -136,10 +147,13 @@ else
 fi
 # Caddyfile: отдаём ТОЛЬКО /sub/<token> из $VEIL/sub, всё прочее -> 404, без листинга.
 # handle_path срезает префикс /sub, поэтому /sub/<token> -> файл <token>.
+# Profile-Title: имя подписки в клиенте (happ читает base64-заголовок) = «🌐 VPN».
+PROFILE_TITLE=$(printf '🌐 VPN' | base64 -w0 2>/dev/null || printf '🌐 VPN' | base64 | tr -d '\n')
 cat > /etc/caddy/Caddyfile <<CADDY
 $SUB_HOST {
 	handle_path /sub/* {
 		root * $VEIL/sub
+		header Profile-Title "base64:$PROFILE_TITLE"
 		file_server
 	}
 	handle {
@@ -210,6 +224,51 @@ ok "Xray и Caddy запущены"
 say "Caddy получает Let's Encrypt сертификат для $SUB_HOST (нужны открытые порты 80/443)…"
 echo "   Если подписка не открывается сразу — подожди 10-30с (выпуск сертификата) и проверь: journalctl -u caddy -n30"
 
+# ── 10. авто-обновление с гита (systemd timer, еженедельно) ──────────────────
+say "Настраиваю авто-обновление (еженедельный git pull маршрутов/кода + пересборка)…"
+# unattended pull приватного репо требует deploy key В git-конфиге репозитория
+# (GIT_SSH_COMMAND при clone не сохраняется). Кладём ключ в $VEIL/deploy_key.
+AUTOUPDATE_PULL=0
+if [ -d "$REPO_DIR/.git" ]; then
+  DEPLOY_KEY="${VEIL_DEPLOY_KEY:-}"
+  for c in "$DEPLOY_KEY" "$REPO_DIR/veil_key" "$REPO_DIR/../veil_key" "./veil_key"; do
+    if [ -n "$c" ] && [ -f "$c" ]; then DEPLOY_KEY="$c"; break; fi
+  done
+  if [ -n "${DEPLOY_KEY:-}" ] && [ -f "$DEPLOY_KEY" ]; then
+    install -m 600 "$DEPLOY_KEY" "$VEIL/deploy_key"
+    git -C "$REPO_DIR" config core.sshCommand \
+      "ssh -i $VEIL/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+    AUTOUPDATE_PULL=1
+  fi
+fi
+cat > /etc/systemd/system/veil-sync.service <<UNIT
+[Unit]
+Description=veil auto-update (git pull + rebuild)
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/veil sync
+UNIT
+cat > /etc/systemd/system/veil-sync.timer <<'UNIT'
+[Unit]
+Description=veil weekly auto-update
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=6h
+Persistent=true
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now veil-sync.timer >/dev/null 2>&1 || true
+if [ "$AUTOUPDATE_PULL" = "1" ]; then
+  ok "авто-обновление включено (еженедельно; deploy key прописан в git)"
+else
+  warn "авто-обновление включено, но git pull может не пройти — не нашёл deploy key."
+  warn "  починить: git -C $REPO_DIR config core.sshCommand 'ssh -i <ключ> -o IdentitiesOnly=yes'"
+fi
+
 echo
 echo -e "${GREEN}  +------------------------------------------------+${NC}"
 echo -e "${GREEN}  |  ГОТОВО. Нода veil поднята.                     |${NC}"
@@ -222,4 +281,13 @@ echo "   Два vless-ключа: veil keys <имя>        (альтернат�
 echo "   Список:         veil list-keys"
 echo "   Удалить:        veil delete-key <имя>"
 echo "   Состояние:      veil status"
-echo "   Обновить:       veil update"
+echo "   Обновить:       veil update    (авто-обновление: уже включено, еженедельно)"
+
+# ── 11. дефолтный ключ + показ подписки и vless-ключей (с QR каждому) ────────
+if [ "$(jq -r 'length' "$VEIL/users.json" 2>/dev/null || echo 0)" = "0" ]; then
+  /usr/local/bin/veil create-key vpn
+else
+  # повторная установка: восстановим юзеров под текущие ключи и покажем первый
+  /usr/local/bin/veil sync >/dev/null 2>&1 || true
+  /usr/local/bin/veil show-key "$(jq -r 'keys[0]' "$VEIL/users.json")"
+fi
