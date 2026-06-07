@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+# veil — управление ключами и подписками veil-ноды.
+# create-key | delete-key | list-keys | show-key | update | status
+set -euo pipefail
+
+CONF=/usr/local/etc/xray/config.json
+VEIL=/etc/veil
+META=$VEIL/server.env
+USERS=$VEIL/users.json
+SUBDIR=$VEIL/sub
+GENPROF=$VEIL/genprofile.py
+GENSERVER=$VEIL/genserver.py
+RED='\033[0;31m'; GREEN='\033[0;32m'; YEL='\033[1;33m'; CY='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+die(){ echo -e "${RED}ERR:${NC} $*" >&2; exit 1; }
+
+[ "$(id -u)" = "0" ] || die "запусти от root"
+for f in "$CONF" "$META" "$USERS" "$GENPROF" "$GENSERVER"; do [ -f "$f" ] || die "нет $f — сначала install.sh"; done
+command -v jq >/dev/null || die "нужен jq"
+# shellcheck disable=SC1090
+. "$META"
+
+qr(){ if command -v qrencode >/dev/null; then qrencode -t ANSIUTF8 "$1"; fi; }
+
+sub_link(){ echo "http://${SRV_IP}:${SUB_PORT}/sub/$1"; }
+
+show_link(){   # $1=token $2=name
+  local link; link=$(sub_link "$1")
+  echo
+  echo -e "${CY}${BOLD}Подписка '$2' (импортируй в happ как подписку):${NC}"
+  echo "$link"
+  qr "$link"
+  echo
+  echo -e "   В ней 2 профиля:"
+  echo -e "     [Обычный]   -- мобильный интернет (3G/4G/5G)"
+  echo -e "     [Усиленный] -- Wi-Fi и более жёсткие блокировки"
+  echo -e "   РУ-сайты идут напрямую мимо VPN (split-routing)."
+  echo
+}
+
+key_exists(){ jq -e --arg n "$1" 'has($n)' "$USERS" >/dev/null 2>&1; }
+
+write_json(){ cat "$1" > "$2"; rm -f "$1"; }   # сохраняет права целевого файла
+
+regen_one(){   # $1=uuid $2=token
+  local tmp; tmp=$(mktemp)
+  VEIL_ENV="$META" VEIL_ROUTES="$VEIL/routes.json" python3 "$GENPROF" "$1" > "$tmp"
+  install -m 644 "$tmp" "$SUBDIR/$2"; rm -f "$tmp"
+}
+
+reload_xray(){
+  xray test -c "$CONF" >/dev/null 2>&1 || die "конфиг сломан, Xray НЕ перезапущен"
+  systemctl restart xray; sleep 1
+  systemctl is-active --quiet xray || die "Xray не стартовал (journalctl -u xray)"
+}
+
+# заменить значение KEY=val в server.env (или добавить)
+set_env_var(){   # $1=key $2=val
+  local tmp; tmp=$(mktemp)
+  if grep -q "^$1=" "$META"; then sed "s|^$1=.*|$1=$2|" "$META" > "$tmp"
+  else cp "$META" "$tmp"; echo "$1=$2" >> "$tmp"; fi
+  cat "$tmp" > "$META"; rm -f "$tmp"
+}
+
+# пересобрать СЕРВЕРНЫЙ конфиг из server.env, сохранив UUID юзеров
+rebuild_server(){
+  local clients tmp
+  clients=$(mktemp); tmp=$(mktemp)
+  jq '[.inbounds[] | select(.tag=="obychny") | .settings.clients[]?]' "$CONF" > "$clients"
+  VEIL_ENV="$META" python3 "$GENSERVER" --clients "$clients" > "$tmp"
+  rm -f "$clients"
+  xray test -c "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; die "новый серверный конфиг невалиден — изменения НЕ применены"; }
+  write_json "$tmp" "$CONF"
+}
+
+# согласованно применить: сервер + все клиентские профили + рестарт
+apply_all(){
+  rebuild_server
+  local cnt=0
+  while IFS=$'\t' read -r uuid token; do
+    [ -n "$token" ] && [ "$token" != "null" ] && { regen_one "$uuid" "$token"; cnt=$((cnt+1)); }
+  done < <(jq -r 'to_entries[] | "\(.value.uuid)\t\(.value.token)"' "$USERS")
+  echo "  >> пересобрано: серверный конфиг + профилей $cnt"
+  reload_xray
+  systemctl restart veil-sub 2>/dev/null || true
+}
+
+cmd_create(){
+  local name="${1:-}"; [ -n "$name" ] || die "имя: veil create-key <имя>"
+  if key_exists "$name"; then die "ключ '$name' уже есть (veil show-key $name)"; fi
+  local uuid token tmp
+  uuid=$(xray uuid 2>/dev/null || cat /proc/sys/kernel/random/uuid)
+  token=$(openssl rand -hex 16)
+  tmp=$(mktemp)
+  jq --arg id "$uuid" --arg n "$name" \
+     '(.inbounds[] | select(.tag=="obychny" or .tag=="usilenny") | .settings.clients) += [{"id":$id,"email":$n}]' \
+     "$CONF" > "$tmp"; write_json "$tmp" "$CONF"
+  reload_xray
+  regen_one "$uuid" "$token"
+  tmp=$(mktemp)
+  jq --arg n "$name" --arg id "$uuid" --arg t "$token" '. + {($n): {"uuid":$id,"token":$t}}' "$USERS" > "$tmp"
+  write_json "$tmp" "$USERS"
+  echo -e "${GREEN}OK ключ '$name' создан${NC}"
+  show_link "$token" "$name"
+}
+
+cmd_delete(){
+  local name="${1:-}"; [ -n "$name" ] || die "имя: veil delete-key <имя>"
+  if ! key_exists "$name"; then die "ключа '$name' нет"; fi
+  local token tmp
+  token=$(jq -r --arg n "$name" '.[$n].token' "$USERS")
+  tmp=$(mktemp)
+  jq --arg n "$name" \
+     '(.inbounds[] | select(.tag=="obychny" or .tag=="usilenny") | .settings.clients) |= map(select(.email != $n))' \
+     "$CONF" > "$tmp"; write_json "$tmp" "$CONF"
+  reload_xray
+  [ -n "$token" ] && [ "$token" != "null" ] && rm -f "$SUBDIR/$token"
+  tmp=$(mktemp); jq --arg n "$name" 'del(.[$n])' "$USERS" > "$tmp"; write_json "$tmp" "$USERS"
+  echo -e "${GREEN}OK ключ '$name' удалён${NC}"
+}
+
+cmd_list(){
+  local n; n=$(jq -r 'length' "$USERS")
+  echo -e "${CY}${BOLD}Ключей: $n${NC}"
+  jq -r 'to_entries[] | "  - \(.key)\t\(.value.uuid)"' "$USERS"
+}
+
+cmd_show(){
+  local name="${1:-}"; [ -n "$name" ] || die "имя: veil show-key <имя>"
+  if ! key_exists "$name"; then die "ключа '$name' нет"; fi
+  local token; token=$(jq -r --arg n "$name" '.[$n].token' "$USERS")
+  show_link "$token" "$name"
+}
+
+cmd_update(){
+  echo -e "${CY}${BOLD}>> Обновление veil${NC}"
+  # 1. свежий код из репо
+  if [ -n "${REPO_DIR:-}" ] && [ -d "$REPO_DIR/.git" ]; then
+    echo "  >> git pull ($REPO_DIR)"; git -C "$REPO_DIR" pull --ff-only || warn_pull=1
+    for f in genprofile.py veil-subserver.py routes.json; do
+      [ -f "$REPO_DIR/$f" ] && install -m 644 "$REPO_DIR/$f" "$VEIL/$f"
+    done
+    [ -f "$REPO_DIR/veil" ] && install -m 755 "$REPO_DIR/veil" /usr/local/bin/veil
+  else
+    echo "  !! REPO_DIR не задан — пропускаю git pull"
+  fi
+  # 2. Xray-core
+  echo "  >> обновляю Xray-core"
+  bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null 2>&1 || echo "  !! не удалось обновить Xray (не критично)"
+  # 3. согласованно пересобрать сервер + профили из единого источника
+  echo "  >> пересобираю конфигурацию"
+  apply_all
+  echo -e "${GREEN}OK обновление завершено${NC}"
+}
+
+cmd_set_sni(){
+  local sni="${1:-}"; [ -n "$sni" ] || die "укажи домен-маску: veil set-sni <домен>  (напр. www.samsung.com)"
+  echo -e "${CY}${BOLD}>> Меняю маскировочный SNI на: $sni${NC}"
+  set_env_var SNI "$sni"
+  . "$META"
+  apply_all
+  echo -e "${GREEN}OK SNI = $sni${NC}"
+  echo -e "${YEL}  !! Пользователям нужно обновить подписку в happ (или дождаться автообновления),${NC}"
+  echo -e "${YEL}     чтобы клиент перешёл на новый SNI. До этого их подключение не пройдёт.${NC}"
+}
+
+cmd_status(){
+  echo -e "${CY}${BOLD}veil status${NC}"
+  echo "  Xray:     $(systemctl is-active xray 2>/dev/null) ($(xray version 2>/dev/null | head -1 || echo '?'))"
+  echo "  veil-sub: $(systemctl is-active veil-sub 2>/dev/null)"
+  echo "  Сервер:   ${SRV_IP}  (sub :${SUB_PORT})"
+  echo "  Порты:    [Обычный] :${PORT_OB}  [Усиленный] :${PORT_US}"
+  echo "  Ключей:   $(jq -r 'length' "$USERS")"
+  local ct cm
+  ct=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo '?')
+  cm=$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo '?')
+  echo "  Conntrack:${ct}/${cm}"
+  for p in "$PORT_OB" "$PORT_US" "$SUB_PORT"; do
+    ss -tlnH "( sport = :$p )" 2>/dev/null | grep -q . && echo "  port :$p  LISTEN" || echo "  port :$p  НЕ слушает!"
+  done
+}
+
+case "${1:-}" in
+  create-key) shift; cmd_create "${1:-}";;
+  delete-key) shift; cmd_delete "${1:-}";;
+  list-keys|list) cmd_list;;
+  show-key)   shift; cmd_show "${1:-}";;
+  update)     cmd_update;;
+  set-sni)    shift; cmd_set_sni "${1:-}";;
+  status)     cmd_status;;
+  *) cat <<USAGE
+veil — управление VPN-нодой
+
+  veil create-key <имя>   создать ключ, показать ссылку-подписку + QR
+  veil delete-key <имя>   удалить ключ
+  veil list-keys          список ключей
+  veil show-key <имя>     показать ссылку-подписку + QR
+  veil update             обновить Xray + конфигурацию (git pull) + пересобрать всё
+  veil set-sni <домен>    сменить маскировочный SNI (напр. www.samsung.com)
+  veil status             состояние ноды (сервисы, порты, ключи)
+
+Каждый ключ = подписка с 2 профилями:
+  [Обычный]   -- мобильный интернет (3G/4G/5G)
+  [Усиленный] -- Wi-Fi и более жёсткие блокировки
+РУ-сайты ходят напрямую мимо VPN (split-routing, обновляемый список).
+USAGE
+  ;;
+esac
