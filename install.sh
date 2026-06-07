@@ -25,9 +25,9 @@ banner
 XRAY_CONF=/usr/local/etc/xray/config.json
 VEIL=/etc/veil
 META=$VEIL/server.env
-PORT_OB=2096          # [Обычный] packet-up
-PORT_US=8443          # [Усиленный] xmux auto
-SUB_PORT=8080         # раздача подписок
+PORT_OB=2087          # [Обычный] packet-up   (Cloudflare-HTTPS-alt, отлично от fleet 2096)
+PORT_US=2083          # [Усиленный] xmux auto  (Cloudflare-HTTPS-alt, отлично от fleet 8443)
+SUB_PORT=8081         # раздача подписок        (отлично от fleet 8080)
 SNI=learn.microsoft.com
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
