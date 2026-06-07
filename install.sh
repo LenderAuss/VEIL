@@ -149,13 +149,29 @@ modprobe nf_conntrack 2>/dev/null || true
 sysctl --system >/dev/null 2>&1 || warn "часть sysctl не применилась (conntrack модуль?) — не критично"
 ok "tuning применён"
 
-# ── 8. firewall ─────────────────────────────────────────────────────────────
-if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-  say "Открываю порты в ufw…"
+# ── 8. firewall (ufw — настраивается автоматически) ─────────────────────────
+say "Настраиваю firewall (ufw)…"
+if ! command -v ufw >/dev/null 2>&1; then
+  apt-get install -y -qq ufw >/dev/null 2>&1 || warn "не смог поставить ufw"
+fi
+if command -v ufw >/dev/null 2>&1; then
+  # СНАЧАЛА разрешаем SSH, иначе ufw enable отрежет доступ к серверу.
+  # Порт текущей SSH-сессии ($SSH_CONNECTION: 4-е поле = порт sshd) + стандартный 22.
+  SSH_PORT=$(echo "${SSH_CONNECTION:-}" | awk '{print $4}')
+  [ -n "$SSH_PORT" ] && ufw allow "$SSH_PORT"/tcp >/dev/null 2>&1 || true
+  ufw allow 22/tcp >/dev/null 2>&1 || true
+  # рабочие порты ноды
   for p in "$PORT_OB" "$PORT_US" "$SUB_PORT"; do ufw allow "$p"/tcp >/dev/null 2>&1 || true; done
-  ok "порты открыты"
+  ufw default deny incoming  >/dev/null 2>&1 || true
+  ufw default allow outgoing >/dev/null 2>&1 || true
+  ufw --force enable >/dev/null 2>&1 || true
+  if ufw status 2>/dev/null | grep -q "Status: active"; then
+    ok "firewall активен (открыты SSH${SSH_PORT:+/$SSH_PORT}, $PORT_OB, $PORT_US, $SUB_PORT)"
+  else
+    warn "ufw не включился — открой в firewall провайдера TCP $PORT_OB, $PORT_US, $SUB_PORT"
+  fi
 else
-  warn "ufw не активен — открой в firewall провайдера TCP $PORT_OB, $PORT_US, $SUB_PORT"
+  warn "ufw недоступен — открой в firewall провайдера TCP $PORT_OB, $PORT_US, $SUB_PORT"
 fi
 
 # ── 9. veil CLI + старт ─────────────────────────────────────────────────────
