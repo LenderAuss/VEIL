@@ -21,14 +21,19 @@ Reality маскируется под чужой SNI (`learn.microsoft.com`) —
 - VPS с чистым публичным IP, Debian 12/13 или Ubuntu 22.04+, root
 - Открытые в firewall провайдера TCP-порты **2096**, **8443**, **8080**
 
-## Установка
+## Установка (приватный репозиторий)
+Репозиторий приватный — установка по токену-доступу (read-only). Токен играет роль пароля:
+без него скачать нельзя.
+
 ```bash
-git clone <repo-url> veil
-cd veil
-sudo bash install.sh
+mkdir -p veil && curl -fsSL -H "Authorization: Bearer ТОКЕН" \
+  https://api.github.com/repos/LenderAuss/VEIL/tarball/main | tar xz -C veil --strip-components=1
+cd veil && sudo bash install.sh
 ```
+(вместо `ТОКЕН` — выданный fine-grained token с доступом Contents: read на этот репозиторий)
+
 Скрипт сам поставит зависимости, сгенерирует **свои** Reality-ключи, развернёт раздачу подписок
-и запустит сервисы.
+и запустит сервисы. Токен в команде нигде не сохраняется (в отличие от `git clone`).
 
 ## Управление
 ```bash
