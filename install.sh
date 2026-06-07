@@ -104,7 +104,7 @@ ok "единый источник $META готов"
 say "Собираю серверный конфиг Xray из единого источника…"
 mkdir -p "$(dirname "$XRAY_CONF")"
 VEIL_ENV="$META" python3 "$VEIL/genserver.py" > "$XRAY_CONF"
-xray test -c "$XRAY_CONF" >/dev/null 2>&1 || die "xray не принял конфиг (xray test -c $XRAY_CONF)"
+xray run -test -c "$XRAY_CONF" >/dev/null 2>&1 || die "xray не принял конфиг (xray run -test -c $XRAY_CONF)"
 ok "серверный конфиг валиден"
 
 # ── 6. systemd для mini-sub ─────────────────────────────────────────────────

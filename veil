@@ -48,7 +48,7 @@ regen_one(){   # $1=uuid $2=token
 }
 
 reload_xray(){
-  xray test -c "$CONF" >/dev/null 2>&1 || die "конфиг сломан, Xray НЕ перезапущен"
+  xray run -test -c "$CONF" >/dev/null 2>&1 || die "конфиг сломан, Xray НЕ перезапущен"
   systemctl restart xray; sleep 1
   systemctl is-active --quiet xray || die "Xray не стартовал (journalctl -u xray)"
 }
@@ -68,7 +68,7 @@ rebuild_server(){
   jq '[.inbounds[] | select(.tag=="obychny") | .settings.clients[]?]' "$CONF" > "$clients"
   VEIL_ENV="$META" python3 "$GENSERVER" --clients "$clients" > "$tmp"
   rm -f "$clients"
-  xray test -c "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; die "новый серверный конфиг невалиден — изменения НЕ применены"; }
+  xray run -test -c "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; die "новый серверный конфиг невалиден — изменения НЕ применены"; }
   write_json "$tmp" "$CONF"
 }
 
