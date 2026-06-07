@@ -27,7 +27,7 @@ VEIL=/etc/veil
 META=$VEIL/server.env
 PORT_OB=2087          # [Обычный] packet-up   (Cloudflare-HTTPS-alt, отлично от fleet 2096)
 PORT_US=2083          # [Усиленный] xmux auto  (Cloudflare-HTTPS-alt, отлично от fleet 8443)
-SUB_PORT=8081         # раздача подписок        (отлично от fleet 8080)
+SUB_PORT=443          # подписка по HTTPS (Caddy + sslip.io) — happ требует https
 SNI=learn.microsoft.com
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -72,11 +72,16 @@ SID_US=$(openssl rand -hex 8)
 PATH_OB="/$(openssl rand -hex 6)"
 PATH_US="/$(openssl rand -hex 6)"
 SRV_IP=$(curl -s --max-time 10 https://api.ipify.org || curl -s --max-time 10 https://ifconfig.me || echo "СЕРВЕР_IP")
+# sslip.io даёт бесплатный hostname из IP (<ip>.sslip.io -> этот IP) — нужен для
+# валидного Let's Encrypt сертификата на подписке (домена у ноды нет).
+SUB_HOST="${SRV_IP}.sslip.io"
 ok "ключи сгенерированы (pbk ${PUB:0:12}…)"
 
 # ── 4. каталог veil + единый источник (server.env) ──────────────────────────
 say "Разворачиваю $VEIL (единый источник параметров + генераторы)…"
-mkdir -p "$VEIL" "$VEIL/sub"; chmod 700 "$VEIL"
+# 711 (а не 700): Caddy-юзер должен ПРОЙТИ в $VEIL/sub за файлами подписок,
+# но не листать каталог. Секреты (server.env, users.json) остаются 600 — нечитаемы.
+mkdir -p "$VEIL" "$VEIL/sub"; chmod 711 "$VEIL" "$VEIL/sub"
 install -m 644 "$REPO_DIR/genprofile.py"     "$VEIL/genprofile.py"
 install -m 644 "$REPO_DIR/genserver.py"      "$VEIL/genserver.py"
 install -m 644 "$REPO_DIR/veil-subserver.py" "$VEIL/veil-subserver.py"
@@ -85,6 +90,7 @@ install -m 644 "$REPO_DIR/routes.json"       "$VEIL/routes.json"
 chmod 600 "$VEIL/users.json"
 cat > "$META" <<ENV
 SRV_IP=$SRV_IP
+SUB_HOST=$SUB_HOST
 SNI=$SNI
 PRIV=$PRIV
 PBK=$PUB
@@ -107,22 +113,41 @@ VEIL_ENV="$META" python3 "$VEIL/genserver.py" > "$XRAY_CONF"
 xray run -test -c "$XRAY_CONF" >/dev/null 2>&1 || die "xray не принял конфиг (xray run -test -c $XRAY_CONF)"
 ok "серверный конфиг валиден"
 
-# ── 6. systemd для mini-sub ─────────────────────────────────────────────────
-say "Поднимаю сервис раздачи подписок (veil-sub :$SUB_PORT)…"
-cat > /etc/systemd/system/veil-sub.service <<UNIT
-[Unit]
-Description=veil subscription server
-After=network.target
-[Service]
-Environment=VEIL_SUB_DIR=$VEIL/sub
-Environment=VEIL_SUB_PORT=$SUB_PORT
-ExecStart=/usr/bin/python3 $VEIL/veil-subserver.py
-Restart=always
-[Install]
-WantedBy=multi-user.target
-UNIT
-systemctl daemon-reload
-systemctl enable veil-sub >/dev/null 2>&1 || true
+# ── 6. Caddy: раздача подписок по HTTPS (валидный серт через sslip.io) ───────
+say "Поднимаю раздачу подписок по HTTPS на $SUB_HOST (Caddy + Let's Encrypt)…"
+# миграция со старого python-сабсервера, если он остался от прошлых версий
+if systemctl list-unit-files 2>/dev/null | grep -q '^veil-sub.service'; then
+  systemctl disable --now veil-sub >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/veil-sub.service; systemctl daemon-reload
+fi
+if ! command -v caddy >/dev/null 2>&1; then
+  say "Ставлю Caddy…"
+  apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https gnupg >/dev/null 2>&1 || true
+  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+    | gpg --dearmor > /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null \
+    || die "не смог получить ключ репозитория Caddy (сеть?)"
+  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+    > /etc/apt/sources.list.d/caddy-stable.list 2>/dev/null \
+    || die "не смог получить список репозитория Caddy"
+  apt-get update -qq && apt-get install -y -qq caddy >/dev/null || die "не удалось поставить caddy"
+  ok "Caddy установлен"
+else
+  ok "Caddy уже установлен"
+fi
+# Caddyfile: отдаём ТОЛЬКО /sub/<token> из $VEIL/sub, всё прочее -> 404, без листинга.
+# handle_path срезает префикс /sub, поэтому /sub/<token> -> файл <token>.
+cat > /etc/caddy/Caddyfile <<CADDY
+$SUB_HOST {
+	handle_path /sub/* {
+		root * $VEIL/sub
+		file_server
+	}
+	handle {
+		respond "not found" 404
+	}
+}
+CADDY
+systemctl enable caddy >/dev/null 2>&1 || true
 
 # ── 7. sysctl tuning (буферы, BBR, conntrack) ───────────────────────────────
 say "Применяю сетевой tuning…"
@@ -160,18 +185,18 @@ if command -v ufw >/dev/null 2>&1; then
   SSH_PORT=$(echo "${SSH_CONNECTION:-}" | awk '{print $4}')
   [ -n "$SSH_PORT" ] && ufw allow "$SSH_PORT"/tcp >/dev/null 2>&1 || true
   ufw allow 22/tcp >/dev/null 2>&1 || true
-  # рабочие порты ноды
-  for p in "$PORT_OB" "$PORT_US" "$SUB_PORT"; do ufw allow "$p"/tcp >/dev/null 2>&1 || true; done
+  # рабочие порты ноды + 80 (Caddy: ACME-проверка Let's Encrypt и редирект на https)
+  for p in "$PORT_OB" "$PORT_US" "$SUB_PORT" 80; do ufw allow "$p"/tcp >/dev/null 2>&1 || true; done
   ufw default deny incoming  >/dev/null 2>&1 || true
   ufw default allow outgoing >/dev/null 2>&1 || true
   ufw --force enable >/dev/null 2>&1 || true
   if ufw status 2>/dev/null | grep -q "Status: active"; then
-    ok "firewall активен (открыты SSH${SSH_PORT:+/$SSH_PORT}, $PORT_OB, $PORT_US, $SUB_PORT)"
+    ok "firewall активен (открыты SSH${SSH_PORT:+/$SSH_PORT}, $PORT_OB, $PORT_US, 80, $SUB_PORT)"
   else
-    warn "ufw не включился — открой в firewall провайдера TCP $PORT_OB, $PORT_US, $SUB_PORT"
+    warn "ufw не включился — открой в firewall провайдера TCP $PORT_OB, $PORT_US, 80, $SUB_PORT"
   fi
 else
-  warn "ufw недоступен — открой в firewall провайдера TCP $PORT_OB, $PORT_US, $SUB_PORT"
+  warn "ufw недоступен — открой в firewall провайдера TCP $PORT_OB, $PORT_US, 80, $SUB_PORT"
 fi
 
 # ── 9. veil CLI + старт ─────────────────────────────────────────────────────
@@ -179,18 +204,21 @@ install -m 755 "$REPO_DIR/veil" /usr/local/bin/veil
 systemctl enable xray >/dev/null 2>&1 || true
 systemctl restart xray; sleep 1
 systemctl is-active --quiet xray || die "Xray не стартовал (journalctl -u xray)"
-systemctl restart veil-sub; sleep 1
-systemctl is-active --quiet veil-sub || die "veil-sub не стартовал (journalctl -u veil-sub)"
-ok "Xray и veil-sub запущены"
+systemctl restart caddy; sleep 1
+systemctl is-active --quiet caddy || die "Caddy не стартовал (journalctl -u caddy)"
+ok "Xray и Caddy запущены"
+say "Caddy получает Let's Encrypt сертификат для $SUB_HOST (нужны открытые порты 80/443)…"
+echo "   Если подписка не открывается сразу — подожди 10-30с (выпуск сертификата) и проверь: journalctl -u caddy -n30"
 
 echo
 echo -e "${GREEN}  +------------------------------------------------+${NC}"
 echo -e "${GREEN}  |  ГОТОВО. Нода veil поднята.                     |${NC}"
 echo -e "${GREEN}  +------------------------------------------------+${NC}"
-echo "   Сервер:     ${SRV_IP}   (подписки на :${SUB_PORT})"
+echo "   Сервер:     ${SRV_IP}   (подписка: https://${SUB_HOST}/sub/...)"
 echo "   Транспорты: [Обычный] :$PORT_OB   |   [Усиленный] :$PORT_US"
 echo
-echo "   Создать ключ:   veil create-key <имя>"
+echo "   Создать ключ:   veil create-key <имя>   (подписка + QR)"
+echo "   Два vless-ключа: veil keys <имя>        (альтернатива, без РУ-сплита)"
 echo "   Список:         veil list-keys"
 echo "   Удалить:        veil delete-key <имя>"
 echo "   Состояние:      veil status"

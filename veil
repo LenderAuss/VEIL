@@ -21,7 +21,30 @@ command -v jq >/dev/null || die "нужен jq"
 
 qr(){ if command -v qrencode >/dev/null; then qrencode -t ANSIUTF8 "$1"; fi; }
 
-sub_link(){ echo "http://${SRV_IP}:${SUB_PORT}/sub/$1"; }
+sub_link(){ echo "https://${SUB_HOST}/sub/$1"; }
+
+# url-кодирование значения для query (кодируем '/' в path и прочие спецсимволы)
+urlenc(){
+  local s="$1" out="" c i
+  for (( i=0; i<${#s}; i++ )); do
+    c="${s:$i:1}"
+    case "$c" in
+      [a-zA-Z0-9.~_-]) out+="$c";;
+      *) printf -v c '%%%02X' "'$c"; out+="$c";;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+# два «голых» vless://-ключа (Обычный + Усиленный) по UUID юзера.
+# ВНИМАНИЕ: share-ссылка не несёт routes (РУ-сплит) и packet-up/xmux extra —
+# это упрощённый импорт без РУ-обхода. Полный профиль — только через подписку.
+vless_links(){   # $1=uuid $2=name
+  local uuid="$1" name="$2" sni pbk
+  sni=$(urlenc "$SNI"); pbk=$(urlenc "$PBK")
+  echo "vless://${uuid}@${SRV_IP}:${PORT_OB}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${SID_OB}&type=xhttp&path=$(urlenc "$PATH_OB")&mode=packet-up#$(urlenc "${name}-Obychny")"
+  echo "vless://${uuid}@${SRV_IP}:${PORT_US}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${SID_US}&type=xhttp&path=$(urlenc "$PATH_US")&mode=auto#$(urlenc "${name}-Usilenny")"
+}
 
 show_link(){   # $1=token $2=name
   local link; link=$(sub_link "$1")
@@ -81,7 +104,8 @@ apply_all(){
   done < <(jq -r 'to_entries[] | "\(.value.uuid)\t\(.value.token)"' "$USERS")
   echo "  >> пересобрано: серверный конфиг + профилей $cnt"
   reload_xray
-  systemctl restart veil-sub 2>/dev/null || true
+  # Caddy раздаёт файлы подписок вживую с диска — рестарт не нужен, только reload на всякий
+  systemctl reload caddy 2>/dev/null || true
 }
 
 cmd_create(){
@@ -131,6 +155,19 @@ cmd_show(){
   show_link "$token" "$name"
 }
 
+# альтернатива подписке: два голых vless://-ключа (без РУ-сплита)
+cmd_keys(){
+  local name="${1:-}"; [ -n "$name" ] || die "имя: veil keys <имя>"
+  if ! key_exists "$name"; then die "ключа '$name' нет (создай: veil create-key $name)"; fi
+  local uuid; uuid=$(jq -r --arg n "$name" '.[$n].uuid' "$USERS")
+  echo
+  echo -e "${CY}${BOLD}Два vless-ключа '$name' (вставь в happ как конфиги):${NC}"
+  vless_links "$uuid" "$name"
+  echo
+  echo -e "${YEL}  !! Это упрощённый импорт: РУ-сайты пойдут ЧЕРЕЗ VPN (без split-routing),${NC}"
+  echo -e "${YEL}     extra-тюнинг packet-up/xmux на дефолтах. Полный профиль — через подписку (veil show-key $name).${NC}"
+}
+
 cmd_update(){
   echo -e "${CY}${BOLD}>> Обновление veil${NC}"
   # 1. свежий код из репо
@@ -166,8 +203,8 @@ cmd_set_sni(){
 cmd_status(){
   echo -e "${CY}${BOLD}veil status${NC}"
   echo "  Xray:     $(systemctl is-active xray 2>/dev/null) ($(xray version 2>/dev/null | head -1 || echo '?'))"
-  echo "  veil-sub: $(systemctl is-active veil-sub 2>/dev/null)"
-  echo "  Сервер:   ${SRV_IP}  (sub :${SUB_PORT})"
+  echo "  Caddy:    $(systemctl is-active caddy 2>/dev/null)  (подписка https://${SUB_HOST}/sub/...)"
+  echo "  Сервер:   ${SRV_IP}"
   echo "  Порты:    [Обычный] :${PORT_OB}  [Усиленный] :${PORT_US}"
   echo "  Ключей:   $(jq -r 'length' "$USERS")"
   local ct cm
@@ -184,6 +221,7 @@ case "${1:-}" in
   delete-key) shift; cmd_delete "${1:-}";;
   list-keys|list) cmd_list;;
   show-key)   shift; cmd_show "${1:-}";;
+  keys)       shift; cmd_keys "${1:-}";;
   update)     cmd_update;;
   set-sni)    shift; cmd_set_sni "${1:-}";;
   status)     cmd_status;;
@@ -194,6 +232,7 @@ veil — управление VPN-нодой
   veil delete-key <имя>   удалить ключ
   veil list-keys          список ключей
   veil show-key <имя>     показать ссылку-подписку + QR
+  veil keys <имя>         два голых vless-ключа (альтернатива, БЕЗ РУ-сплита)
   veil update             обновить Xray + конфигурацию (git pull) + пересобрать всё
   veil set-sni <домен>    сменить маскировочный SNI (напр. www.samsung.com)
   veil status             состояние ноды (сервисы, порты, ключи)
