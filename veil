@@ -18,24 +18,26 @@ for f in "$CONF" "$META" "$USERS" "$GENPROF" "$GENSERVER"; do [ -f "$f" ] || die
 command -v jq >/dev/null || die "нужен jq"
 # shellcheck disable=SC1090
 . "$META"
+FLAG="${FLAG:-🌍}"   # на случай старого server.env без FLAG
 
 qr(){ if command -v qrencode >/dev/null; then qrencode -t ANSIUTF8 "$1"; fi; }
 
 sub_link(){ echo "https://${SUB_HOST}/sub/$1"; }
 
-# url-кодирование значения для query/fragment. Через jq @uri — он корректно
-# кодирует UTF-8 побайтно (эмодзи/кириллица). Ручной bash-вариант ломал
-# многобайтовые символы (брал значение символа >255 → битый %XX).
+# url-кодирование значения query (path/sni/pbk). Через jq @uri — корректный
+# UTF-8 побайтно. Метку (#fragment) НЕ кодируем: happ не декодирует %-encoding
+# (показывал бы кашу %F0%9F… → ключи на вид одинаковые), а сырой UTF-8 рендерит
+# и флаг страны ведёт слева как иконку (как в боевом).
 urlenc(){ printf '%s' "$1" | jq -sRr @uri; }
 
 # два «голых» vless://-ключа (Обычный + Усиленный) по UUID юзера.
 # ВНИМАНИЕ: share-ссылка не несёт routes (РУ-сплит) и packet-up/xmux extra —
 # это упрощённый импорт без РУ-обхода. Полный профиль — только через подписку.
-vless_links(){   # $1=uuid (метки фиксированы: 📱 Обычный / 🛡 Усиленный, ведущий эмодзи)
+vless_links(){   # $1=uuid; метки сырым UTF-8: "<флаг> Обычный/Усиленный" (флаг страны слева)
   local uuid="$1" sni pbk
   sni=$(urlenc "$SNI"); pbk=$(urlenc "$PBK")
-  echo "vless://${uuid}@${SRV_IP}:${PORT_OB}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${SID_OB}&type=xhttp&path=$(urlenc "$PATH_OB")&mode=packet-up#$(urlenc "📱 Обычный")"
-  echo "vless://${uuid}@${SRV_IP}:${PORT_US}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${SID_US}&type=xhttp&path=$(urlenc "$PATH_US")&mode=auto#$(urlenc "🛡 Усиленный")"
+  echo "vless://${uuid}@${SRV_IP}:${PORT_OB}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${SID_OB}&type=xhttp&path=$(urlenc "$PATH_OB")&mode=packet-up#${FLAG} Обычный"
+  echo "vless://${uuid}@${SRV_IP}:${PORT_US}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${SID_US}&type=xhttp&path=$(urlenc "$PATH_US")&mode=auto#${FLAG} Усиленный"
 }
 
 show_all(){   # $1=token $2=name $3=uuid — подписка + два vless-ключа, у каждого свой QR

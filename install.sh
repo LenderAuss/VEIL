@@ -120,7 +120,18 @@ SRV_IP=$(curl -s --max-time 10 https://api.ipify.org || curl -s --max-time 10 ht
 # sslip.io даёт бесплатный hostname из IP (<ip>.sslip.io -> этот IP) — нужен для
 # валидного Let's Encrypt сертификата на подписке (домена у ноды нет).
 SUB_HOST="${SRV_IP}.sslip.io"
-ok "ключи готовы (pbk ${PUB:0:12}…)"
+# Гео сервера -> флаг страны (ведущая иконка профиля в happ, как в боевом).
+# Определяется автоматически для ЛЮБОЙ страны; не вышло -> 🌍. Идемпотентно:
+# если флаг уже в server.env (переустановка) — не передёргиваем.
+if [ -z "${FLAG:-}" ]; then
+  CC=$(curl -s --max-time 10 "http://ip-api.com/line/?fields=countryCode" 2>/dev/null | tr -dc 'A-Za-z')
+  [ -n "$CC" ] || CC=$(curl -s --max-time 10 "https://ifconfig.co/country-iso" 2>/dev/null | tr -dc 'A-Za-z')
+  FLAG=$(printf '%s' "$CC" | python3 -c "import sys
+cc=sys.stdin.read().strip().upper()
+print(''.join(chr(0x1F1E6+ord(c)-65) for c in cc) if len(cc)==2 and cc.isalpha() else '\U0001F30D')" 2>/dev/null)
+  [ -n "$FLAG" ] || FLAG="🌍"
+fi
+ok "ключи готовы (pbk ${PUB:0:12}…); страна ${CC:-?} ${FLAG}"
 
 # ── 4. каталог veil + единый источник (server.env) ──────────────────────────
 say "Разворачиваю $VEIL (единый источник параметров + генераторы)…"
@@ -136,6 +147,7 @@ chmod 600 "$VEIL/users.json"
 cat > "$META" <<ENV
 SRV_IP=$SRV_IP
 SUB_HOST=$SUB_HOST
+FLAG=$FLAG
 SNI=$SNI
 PRIV=$PRIV
 PBK=$PUB

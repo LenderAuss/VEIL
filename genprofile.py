@@ -50,6 +50,7 @@ def main():
     e = load_env(ENV)
     routes = json.load(open(ROUTES))
     sni = e["SNI"]
+    flag = e.get("FLAG") or "\U0001F30D"  # флаг страны сервера (ведущая иконка), fallback 🌍
 
     base = {"log": {"loglevel": "error"},
             "dns": {"queryStrategy": "UseIPv4", "servers": ["8.8.8.8", "1.1.1.1"], "tag": "dns-in"}}
@@ -95,9 +96,9 @@ def main():
 
     configs = [
         {**base, "inbounds": inbounds, "outbounds": [obychny, frag] + static,
-         "routing": routing, "remarks": "📱 Обычный"},
+         "routing": routing, "remarks": f"{flag} Обычный"},
         {**base, "inbounds": inbounds, "outbounds": [usilenny, frag] + static,
-         "routing": routing, "remarks": "🛡 Усиленный"},
+         "routing": routing, "remarks": f"{flag} Усиленный"},
     ]
     print(json.dumps(configs, ensure_ascii=False, indent=2))
 
