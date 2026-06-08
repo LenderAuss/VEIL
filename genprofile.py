@@ -35,6 +35,12 @@ def build_routing(routes):
         rules.append({"type": "field", "domain": doms, "outboundTag": "direct"})
     # QUIC/UDP-443 в block — чтобы трафик не утекал мимо split-роутинга
     rules.append({"type": "field", "network": "udp", "port": "443", "outboundTag": "block"})
+    # DNS как в боевом happ-smart: запросы внутреннего резолвера (dns-in) идут
+    # ЧЕРЕЗ VPN (proxy) — анти-leak, иначе DNS резолвится РУ-провайдером и палит
+    # гео (ломались сервисы вроде RedotPay); port 53 → dns-out. Теги dns-in
+    # (в dns-блоке base) и dns-out (в outbounds) уже есть.
+    rules.append({"type": "field", "inboundTag": ["dns-in"], "outboundTag": "proxy"})
+    rules.append({"type": "field", "port": "53", "outboundTag": "dns-out"})
     return {"domainMatcher": "hybrid", "domainStrategy": "IPIfNonMatch", "rules": rules}
 
 def main():
@@ -78,14 +84,14 @@ def main():
                     "xhttpSettings": {"path": path, "mode": mode, "extra": extra}}}
 
     obychny = vless(e["PORT_OB"], e["SID_OB"], e["PATH_OB"], "packet-up", {
-        "xPaddingBytes": "1-1000", "scMaxEachPostBytes": "500000-1000000",
+        "xPaddingBytes": "100-1000", "scMaxEachPostBytes": "500000-1000000",
         "scMinPostsIntervalMs": "30-50", "scMaxBufferedPosts": 30, "scStreamUpServerSecs": "20-80",
         "xmux": {"maxConcurrency": "16-32", "cMaxReuseTimes": "64-128", "hMaxRequestTimes": "600-900",
                  "hMaxReusableSecs": "1800-3000", "hKeepAlivePeriod": 30}})
     usilenny = vless(e["PORT_US"], e["SID_US"], e["PATH_US"], "auto", {
-        "xPaddingBytes": "1-1000", "noGRPCHeader": False, "noSSEHeader": False,
+        "xPaddingBytes": "100-1000", "noGRPCHeader": False, "noSSEHeader": False,
         "xmux": {"cMaxReuseTimes": "300-500", "hKeepAlivePeriod": 30, "hMaxRequestTimes": "600-900",
-                 "hMaxReusableSecs": "1800-3000", "maxConcurrency": "16-32"}})
+                 "hMaxReusableSecs": "1800-3000", "maxConcurrency": "8-16"}})
 
     configs = [
         {**base, "inbounds": inbounds, "outbounds": [obychny, frag] + static,

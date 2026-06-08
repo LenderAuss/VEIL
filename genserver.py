@@ -45,14 +45,14 @@ def main():
         }
 
     obychny = inbound("obychny", e["PORT_OB"], e["SID_OB"], e["PATH_OB"], "packet-up", {
-        "xPaddingBytes": "1-1000", "scMaxEachPostBytes": "500000-1000000",
+        "xPaddingBytes": "100-1000", "scMaxEachPostBytes": "500000-1000000",
         "scMinPostsIntervalMs": "30-50", "scMaxBufferedPosts": 30, "scStreamUpServerSecs": "20-80",
         "xmux": {"maxConcurrency": "16-32", "cMaxReuseTimes": "64-128", "hMaxRequestTimes": "600-900",
                  "hMaxReusableSecs": "1800-3000", "hKeepAlivePeriod": 30}})
     usilenny = inbound("usilenny", e["PORT_US"], e["SID_US"], e["PATH_US"], "auto", {
-        "xPaddingBytes": "1-1000", "noGRPCHeader": False, "noSSEHeader": False,
+        "xPaddingBytes": "100-1000", "noGRPCHeader": False, "noSSEHeader": False,
         "xmux": {"cMaxReuseTimes": "300-500", "hKeepAlivePeriod": 30, "hMaxRequestTimes": "600-900",
-                 "hMaxReusableSecs": "1800-3000", "maxConcurrency": "16-32"}})
+                 "hMaxReusableSecs": "1800-3000", "maxConcurrency": "8-16"}})
 
     config = {
         "log": {"loglevel": "warning"},
