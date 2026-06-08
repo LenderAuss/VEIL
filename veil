@@ -23,18 +23,10 @@ qr(){ if command -v qrencode >/dev/null; then qrencode -t ANSIUTF8 "$1"; fi; }
 
 sub_link(){ echo "https://${SUB_HOST}/sub/$1"; }
 
-# url-кодирование значения для query (кодируем '/' в path и прочие спецсимволы)
-urlenc(){
-  local s="$1" out="" c i
-  for (( i=0; i<${#s}; i++ )); do
-    c="${s:$i:1}"
-    case "$c" in
-      [a-zA-Z0-9.~_-]) out+="$c";;
-      *) printf -v c '%%%02X' "'$c"; out+="$c";;
-    esac
-  done
-  printf '%s' "$out"
-}
+# url-кодирование значения для query/fragment. Через jq @uri — он корректно
+# кодирует UTF-8 побайтно (эмодзи/кириллица). Ручной bash-вариант ломал
+# многобайтовые символы (брал значение символа >255 → битый %XX).
+urlenc(){ printf '%s' "$1" | jq -sRr @uri; }
 
 # два «голых» vless://-ключа (Обычный + Усиленный) по UUID юзера.
 # ВНИМАНИЕ: share-ссылка не несёт routes (РУ-сплит) и packet-up/xmux extra —
