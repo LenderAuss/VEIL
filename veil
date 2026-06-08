@@ -39,17 +39,17 @@ urlenc(){
 # два «голых» vless://-ключа (Обычный + Усиленный) по UUID юзера.
 # ВНИМАНИЕ: share-ссылка не несёт routes (РУ-сплит) и packet-up/xmux extra —
 # это упрощённый импорт без РУ-обхода. Полный профиль — только через подписку.
-vless_links(){   # $1=uuid (имя ключа не выводим в метку — бренд фиксированный «🌐 VPN»)
+vless_links(){   # $1=uuid (метки фиксированы: 📱 Обычный / 🛡 Усиленный, ведущий эмодзи)
   local uuid="$1" sni pbk
   sni=$(urlenc "$SNI"); pbk=$(urlenc "$PBK")
-  echo "vless://${uuid}@${SRV_IP}:${PORT_OB}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${SID_OB}&type=xhttp&path=$(urlenc "$PATH_OB")&mode=packet-up#$(urlenc "🌐 VPN · Обычный")"
-  echo "vless://${uuid}@${SRV_IP}:${PORT_US}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${SID_US}&type=xhttp&path=$(urlenc "$PATH_US")&mode=auto#$(urlenc "🌐 VPN · Усиленный")"
+  echo "vless://${uuid}@${SRV_IP}:${PORT_OB}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${SID_OB}&type=xhttp&path=$(urlenc "$PATH_OB")&mode=packet-up#$(urlenc "📱 Обычный")"
+  echo "vless://${uuid}@${SRV_IP}:${PORT_US}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${SID_US}&type=xhttp&path=$(urlenc "$PATH_US")&mode=auto#$(urlenc "🛡 Усиленный")"
 }
 
 show_all(){   # $1=token $2=name $3=uuid — подписка + два vless-ключа, у каждого свой QR
   local link; link=$(sub_link "$1")
   echo
-  echo -e "${CY}${BOLD}🌐 VPN — подписка (рекомендуется: РУ-сайты мимо VPN + авто-обновление):${NC}"
+  echo -e "${CY}${BOLD}VPN — подписка (рекомендуется: РУ-сайты мимо VPN + авто-обновление):${NC}"
   echo "$link"
   qr "$link"
   echo

@@ -19,7 +19,6 @@ banner(){ echo -e "${CY}"; cat <<'B'
 B
 echo -e "${NC}"; }
 
-banner
 [ "$(id -u)" = "0" ] || die "запусти от root (sudo bash install.sh)"
 
 XRAY_CONF=/usr/local/etc/xray/config.json
@@ -47,6 +46,24 @@ if [ ! -f "$REPO_DIR/genserver.py" ]; then
   fi
   exec bash "$DEST/install.sh" "$@"
 fi
+
+# ── 0.5 устойчивость к обрыву SSH ────────────────────────────────────────────
+# Перезапускаем установку в отдельной сессии (setsid, без управляющего
+# терминала) с логом. Обрыв SSH тогда НЕ убивает установку — переподключишься
+# и сделаешь `tail -f $VEIL_LOG` или `veil status`. Прогресс показываем live.
+VEIL_LOG=/var/log/veil-install.log
+if [ -z "${VEIL_DETACHED:-}" ] && [ -t 1 ]; then
+  export VEIL_DETACHED=1
+  : > "$VEIL_LOG"
+  setsid bash "$0" "$@" >>"$VEIL_LOG" 2>&1 </dev/null &
+  cpid=$!
+  echo "  >> установка идёт устойчиво к обрыву SSH (лог: $VEIL_LOG)."
+  echo "     можно безопасно отключиться; вернёшься — 'tail -f $VEIL_LOG' или 'veil status'."
+  tail -f "$VEIL_LOG" --pid="$cpid" 2>/dev/null || true
+  wait "$cpid" 2>/dev/null; exit $?
+fi
+
+banner
 
 # ── 1. зависимости ──────────────────────────────────────────────────────────
 say "Проверяю зависимости…"
@@ -164,8 +181,8 @@ else
 fi
 # Caddyfile: отдаём ТОЛЬКО /sub/<token> из $VEIL/sub, всё прочее -> 404, без листинга.
 # handle_path срезает префикс /sub, поэтому /sub/<token> -> файл <token>.
-# Profile-Title: имя подписки в клиенте (happ читает base64-заголовок) = «🌐 VPN».
-PROFILE_TITLE=$(printf '🌐 VPN' | base64 -w0 2>/dev/null || printf '🌐 VPN' | base64 | tr -d '\n')
+# Profile-Title: имя подписки (группы) в клиенте (happ читает base64-заголовок) = «VPN».
+PROFILE_TITLE=$(printf 'VPN' | base64 -w0 2>/dev/null || printf 'VPN' | base64 | tr -d '\n')
 cat > /etc/caddy/Caddyfile <<CADDY
 $SUB_HOST {
 	handle_path /sub/* {
