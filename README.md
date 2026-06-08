@@ -11,42 +11,46 @@ Self-hosted анти-DPI VPN-нода на **VLESS + Reality** (без доме�
 Reality маскируется под чужой SNI (`learn.microsoft.com`) — **свой домен и сертификаты не нужны**.
 
 ## Что ставится одним скриптом
-- **Xray-core** — сама VPN-нода (2 транспорта)
-- **mini-sub** (`veil-sub`) — лёгкая раздача профилей по `http://IP:8080/sub/<token>`
+- **Xray-core** — сама VPN-нода (2 транспорта: `[Обычный]` :2087, `[Усиленный]` :2083)
+- **Caddy** — раздача подписок по **HTTPS** на `https://<IP>.sslip.io/sub/<token>` с
+  валидным Let's Encrypt сертификатом (домен и серт не нужны — hostname берётся из IP)
 - **veil** — CLI управления ключами
 - **routes.json** — список РУ-направлений, идущих мимо VPN (≈300 правил: `geoip:ru`, `.ru/.su/.рф`, банки, госуслуги)
+- **ufw** — firewall настраивается автоматически (SSH + рабочие порты + 80/443)
+- **авто-обновление** — systemd-таймер еженедельно тянет код/маршруты из git и пересобирает
 - сетевой tuning (BBR, буферы, conntrack — чтобы нода не зависала)
 
 ## Требования
 - VPS с чистым публичным IP, Debian 12/13 или Ubuntu 22.04+, root
-- Открытые в firewall провайдера TCP-порты **2096**, **8443**, **8080**
+- Входящие TCP **80** и **443** должны быть доступны из интернета (для выпуска
+  Let's Encrypt сертификата). ufw на самой ноде скрипт настроит сам; если у хостера
+  есть внешний firewall/security-group — открой там 80/443/2087/2083.
 
-## Установка (приватный репозиторий, deploy key)
-Репозиторий приватный. Доступ — по read-only **deploy key** (привязан только к этому репо,
-к другим репозиториям доступа не даёт). Ключ выдаётся лично.
-
+## Установка — одна команда
 ```bash
-# 1. сохрани выданный приватный ключ в файл veil_key рядом
-chmod 600 veil_key
-
-# 2. клонируй и установи
-GIT_SSH_COMMAND="ssh -i ./veil_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
-  git clone git@github.com:LenderAuss/VEIL.git veil
-cd veil && sudo bash install.sh
+wget -qO- https://raw.githubusercontent.com/LenderAuss/VEIL/main/install.sh | sudo bash
+```
+или через curl:
+```bash
+curl -fsSL https://raw.githubusercontent.com/LenderAuss/VEIL/main/install.sh | sudo bash
 ```
 
-Скрипт сам поставит зависимости, сгенерирует **свои** Reality-ключи, развернёт раздачу подписок
-и запустит сервисы.
+Скрипт сам поставит зависимости, склонирует репозиторий (для авто-обновлений), сгенерирует
+**свои** Reality-ключи, поднимет HTTPS-раздачу подписок, настроит firewall, создаст
+дефолтный ключ и покажет подписку + два vless-ключа с QR. Повторный запуск **идемпотентен** —
+ключи не сменятся, пользователи не отвалятся.
 
 ## Управление
 ```bash
-veil create-key alice     # создать ключ → ссылка-подписка + QR
+veil create-key alice     # создать ключ → подписка + 2 vless-ключа + QR
+veil keys alice           # только два голых vless-ключа (быстрый импорт, без РУ-сплита)
 veil list-keys            # список ключей
-veil show-key alice       # снова показать подписку + QR
+veil show-key alice       # снова показать подписку + ключи + QR
 veil delete-key alice     # удалить ключ
 veil status               # состояние: сервисы, порты, ключи, conntrack
 veil set-sni www.samsung.com   # сменить маскировочный SNI (если текущий начали палить)
-veil update               # обновить Xray + конфигурацию (git pull) + пересобрать всё
+veil sync                 # обновить код/маршруты из git + пересобрать (без Xray-core)
+veil update               # полное обновление: Xray-core + sync
 ```
 
 ## Как подключить пользователя
@@ -70,19 +74,19 @@ veil update               # обновить Xray + конфигурацию (gi
 обновить подписку (или дождаться автообновления), чтобы перейти на новый SNI.
 
 ## Безопасность
-- Все ключи генерируются локально при установке — в репозитории секретов нет.
-- mini-sub отдаёт **только** `/sub/<token>` (токен — 32 hex), без листинга каталога и path-traversal.
-- Раздача по `http` (без домена/TLS): профиль с UUID виден при первой загрузке подписки —
-  для личного круга это приемлемо; при желании можно поставить TLS позже.
-- `/etc/veil/` (server.env, users.json) — режим `600/700`. **Не коммить** этот каталог.
+- Репозиторий публичный, но **секретов в нём нет**: все ключи (Reality privateKey, UUID,
+  shortId, токены) генерируются локально на ноде при установке.
+- Подписка раздаётся по **HTTPS** (Caddy + Let's Encrypt) — UUID не светится в открытом виде.
+- Caddy отдаёт **только** `/sub/<token>`, всё прочее → 404, без листинга каталога.
+- `/etc/veil/` — `server.env`/`users.json` в режиме `600`, каталог `711`. **Не коммитится.**
+- Маскировка: Reality под чужой SNI; порты `2087/2083` отличны от типовых.
 
 ## Структура репозитория
 ```
-install.sh          установка всего стека
+install.sh          установка всего стека (+ self-bootstrap для wget|bash)
 veil                CLI управления (→ /usr/local/bin/veil)
 genserver.py        генератор СЕРВЕРНОГО конфига из server.env (единый источник)
 genprofile.py       генератор клиентского профиля (vless + split-routing)
-veil-subserver.py   mini-sub: раздача профилей без листинга
 routes.json         РУ-направления мимо VPN (обновляемый)
 README.md
 ```
@@ -90,7 +94,8 @@ README.md
 ## Диагностика
 ```bash
 veil status
-systemctl status xray veil-sub
+systemctl status xray caddy
 journalctl -u xray -n 50
-xray test -c /usr/local/etc/xray/config.json
+journalctl -u caddy -n 50            # выпуск/продление сертификата
+xray run -test -c /usr/local/etc/xray/config.json
 ```

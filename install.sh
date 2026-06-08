@@ -29,7 +29,24 @@ PORT_OB=2087          # [Обычный] packet-up   (Cloudflare-HTTPS-alt, от
 PORT_US=2083          # [Усиленный] xmux auto  (Cloudflare-HTTPS-alt, отлично от fleet 8443)
 SUB_PORT=443          # подписка по HTTPS (Caddy + sslip.io) — happ требует https
 SNI=learn.microsoft.com
-REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"; REPO_DIR="${REPO_DIR:-.}"
+REPO_URL="https://github.com/LenderAuss/VEIL.git"
+
+# ── 0. self-bootstrap: запуск через `wget -qO- .../install.sh | sudo bash` ───
+# В таком режиме рядом нет остальных файлов репо — ставим git, клонируем и
+# перезапускаемся уже из клона (нужно для авто-обновления: репо на диске).
+if [ ! -f "$REPO_DIR/genserver.py" ]; then
+  say "bootstrap: запуск без репозитория — клонирую $REPO_URL…"
+  command -v git >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq git >/dev/null 2>&1; }
+  command -v git >/dev/null 2>&1 || die "нужен git (не смог поставить)"
+  DEST=/opt/veil-src
+  if [ -d "$DEST/.git" ]; then
+    git -C "$DEST" pull --ff-only >/dev/null 2>&1 || true
+  else
+    rm -rf "$DEST"; git clone --depth 1 "$REPO_URL" "$DEST" >/dev/null 2>&1 || die "не смог склонировать $REPO_URL"
+  fi
+  exec bash "$DEST/install.sh" "$@"
+fi
 
 # ── 1. зависимости ──────────────────────────────────────────────────────────
 say "Проверяю зависимости…"
@@ -226,21 +243,9 @@ echo "   Если подписка не открывается сразу — п
 
 # ── 10. авто-обновление с гита (systemd timer, еженедельно) ──────────────────
 say "Настраиваю авто-обновление (еженедельный git pull маршрутов/кода + пересборка)…"
-# unattended pull приватного репо требует deploy key В git-конфиге репозитория
-# (GIT_SSH_COMMAND при clone не сохраняется). Кладём ключ в $VEIL/deploy_key.
+# Репозиторий публичный — git pull по HTTPS без авторизации, ключи не нужны.
 AUTOUPDATE_PULL=0
-if [ -d "$REPO_DIR/.git" ]; then
-  DEPLOY_KEY="${VEIL_DEPLOY_KEY:-}"
-  for c in "$DEPLOY_KEY" "$REPO_DIR/veil_key" "$REPO_DIR/../veil_key" "./veil_key"; do
-    if [ -n "$c" ] && [ -f "$c" ]; then DEPLOY_KEY="$c"; break; fi
-  done
-  if [ -n "${DEPLOY_KEY:-}" ] && [ -f "$DEPLOY_KEY" ]; then
-    install -m 600 "$DEPLOY_KEY" "$VEIL/deploy_key"
-    git -C "$REPO_DIR" config core.sshCommand \
-      "ssh -i $VEIL/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
-    AUTOUPDATE_PULL=1
-  fi
-fi
+[ -d "$REPO_DIR/.git" ] && AUTOUPDATE_PULL=1
 cat > /etc/systemd/system/veil-sync.service <<UNIT
 [Unit]
 Description=veil auto-update (git pull + rebuild)
@@ -263,10 +268,10 @@ UNIT
 systemctl daemon-reload
 systemctl enable --now veil-sync.timer >/dev/null 2>&1 || true
 if [ "$AUTOUPDATE_PULL" = "1" ]; then
-  ok "авто-обновление включено (еженедельно; deploy key прописан в git)"
+  ok "авто-обновление включено (еженедельно, git pull по HTTPS)"
 else
-  warn "авто-обновление включено, но git pull может не пройти — не нашёл deploy key."
-  warn "  починить: git -C $REPO_DIR config core.sshCommand 'ssh -i <ключ> -o IdentitiesOnly=yes'"
+  warn "авто-обновление включено, но $REPO_DIR не git-репозиторий — git pull пропустится."
+  warn "  ставь через wget-однострочник или git clone, чтобы код тоже обновлялся."
 fi
 
 echo
